@@ -1,91 +1,151 @@
 <?php
-namespace App\Repositories;
 
-use App\Core\DuplicateRecordException;
-use PDO;
-use PDOException;
+namespace App\Repositories;
 
 class PatientRepository
 {
-    public function __construct(private PDO $db) {}
+    protected $db;
 
-    // Đếm tổng số bệnh nhân để tính số trang (Pagination)
-    public function countAll(string $keyword = ''): int
+    /**
+     * Khởi tạo kết nối Database qua PDO
+     */
+    public function __construct($db)
     {
-        $sql = "SELECT COUNT(*) AS total FROM patients";
-        $params = [];
-        if ($keyword !== '') {
-            $sql .= " WHERE name LIKE :keyword OR email LIKE :keyword OR phone LIKE :keyword";
-            $params['keyword'] = '%' . $keyword . '%';
-        }
-        $stmt = $this->db->prepare($sql);
-        $stmt->execute($params);
-        return (int) ($stmt->fetch()['total'] ?? 0);
+        $this->db = $db;
     }
 
-    // Lấy danh sách bệnh nhân phân trang kèm Sort Whitelist an toàn
-    public function getPaginated(string $keyword, int $limit, int $offset, string $sort, string $direction): array
+    /**
+     * [TC17] Tìm kiếm bệnh nhân theo Tên, Email hoặc SĐT (Sửa lỗi HY093)
+     */
+    public function search($keyword)
     {
-        $sql = "SELECT id, name, email, phone, status, created_at FROM patients";
-        $params = [];
-        if ($keyword !== '') {
-            $sql .= " WHERE name LIKE :keyword OR email LIKE :keyword OR phone LIKE :keyword";
-            $params['keyword'] = '%' . $keyword . '%';
-        }
-        
-        // Nối trực tiếp cột đã qua Whitelist kiểm duyệt an toàn
-        $sql .= " ORDER BY {$sort} {$direction} LIMIT :limit OFFSET :offset";
-        
+        $searchParam = "%" . $keyword . "%";
+
+        // Gán 3 nhãn khác nhau để khớp hoàn toàn với mảng execute
+        $sql = "SELECT * FROM patients 
+                WHERE name LIKE :keyword1 
+                   OR email LIKE :keyword2 
+                   OR phone LIKE :keyword3 
+                ORDER BY id DESC";
+
         $stmt = $this->db->prepare($sql);
-        foreach ($params as $key => $value) {
-            $stmt->bindValue(':' . $key, $value, PDO::PARAM_STR);
-        }
-        $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
-        $stmt->bindValue(':offset', $offset, PDO::PARAM_INT);
+        
+        $stmt->execute([
+            ':keyword1' => $searchParam,
+            ':keyword2' => $searchParam,
+            ':keyword3' => $searchParam
+        ]);
+
+        return $stmt->fetchAll(\PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * [TC11, TC12] Thêm hồ sơ bệnh nhân mới
+     */
+    public function create($data)
+    {
+        $sql = "INSERT INTO patients (name, email, phone, status, notes, created_at) 
+                VALUES (:name, :email, :phone, :status, :notes, NOW())";
+                
+        $stmt = $this->db->prepare($sql);
+        return $stmt->execute([
+            ':name'   => $data['name'],
+            ':email'  => $data['email'],
+            ':phone'  => $data['phone'],
+            ':status' => $data['status'] ?? 'new',
+            ':notes'  => $data['notes'] ?? ''
+        ]);
+    }
+
+    /**
+     * [TC13] Lấy thông tin một bệnh nhân theo ID để sửa
+     */
+    public function findById($id)
+    {
+        $sql = "SELECT * FROM patients WHERE id = :id LIMIT 1";
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute([':id' => $id]);
+        return $stmt->fetch(\PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * Kiểm tra Email trùng lặp để phục vụ TC12
+     */
+    public function findActiveByEmail($email)
+    {
+        $sql = "SELECT * FROM patients WHERE email = :email LIMIT 1";
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute([':email' => $email]);
+        return $stmt->fetch(\PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * Cập nhật thông tin bệnh nhân
+     */
+    public function update($id, $data)
+    {
+        $sql = "UPDATE patients 
+                SET name = :name, email = :email, phone = :phone, status = :status, notes = :notes 
+                WHERE id = :id";
+                
+        $stmt = $this->db->prepare($sql);
+        return $stmt->execute([
+            ':id'     => $id,
+            ':name'   => $data['name'],
+            ':email'  => $data['email'],
+            ':phone'  => $data['phone'],
+            ':status' => $data['status'],
+            ':notes'  => $data['notes'] ?? ''
+        ]);
+    }
+
+    /**
+     * [TC14] Xóa bệnh nhân (Chỉ nhận qua phương thức bảo mật)
+     */
+    public function delete($id)
+    {
+        $sql = "DELETE FROM patients WHERE id = :id";
+        $stmt = $this->db->prepare($sql);
+        return $stmt->execute([':id' => $id]);
+    }
+
+    /**
+     * Hàm đếm tổng số bệnh nhân để tính số trang (Fix lỗi line 18 Service)
+     */
+    public function countAll()
+    {
+        $sql = "SELECT COUNT(*) as total FROM patients";
+        $stmt = $this->db->prepare($sql);
         $stmt->execute();
-        return $stmt->fetchAll();
+        $result = $stmt->fetch(\PDO::FETCH_ASSOC);
+        return (int)($result['total'] ?? 0);
     }
 
-    public function create(array $data): bool
+    /**
+     * [TC18, TC19, TC20] Lấy danh sách bệnh nhân kèm Phân Trang (Fix lỗi line 32 Service)
+     */
+    public function getPaginated($page = 1, $limit = 5, $sortColumn = 'id', $sortOrder = 'DESC')
     {
-        $sql = "INSERT INTO patients (name, email, phone, status, note) VALUES (:name, :email, :phone, :status, :note)";
+        // Danh sách trắng các cột cho phép sort để chống SQL Injection (TC20)
+        $allowedColumns = ['id', 'name', 'email', 'phone', 'status'];
+        if (!in_array($sortColumn, $allowedColumns)) {
+            $sortColumn = 'id';
+        }
+        
+        $sortOrder = (strtoupper($sortOrder) === 'ASC') ? 'ASC' : 'DESC';
+        
+        // Xử lý trang âm hoặc quá lớn (TC18)
+        $page = (int)$page;
+        if ($page < 1) $page = 1;
+        $offset = ($page - 1) * $limit;
+
+        $sql = "SELECT * FROM patients ORDER BY {$sortColumn} {$sortOrder} LIMIT :limit OFFSET :offset";
+        
         $stmt = $this->db->prepare($sql);
-        try {
-            return $stmt->execute($data);
-        } catch (PDOException $e) {
-            // Lỗi số 1062 là mã lỗi trùng khóa UNIQUE trong MySQL
-            if (isset($e->errorInfo[1]) && (int)$e->errorInfo[1] === 1062) {
-                throw new DuplicateRecordException('Email này đã được đăng ký trong hệ thống.');
-            }
-            throw $e;
-        }
-    }
-
-    public function findById(int $id): ?array
-    {
-        $stmt = $this->db->prepare("SELECT * FROM patients WHERE id = :id LIMIT 1");
-        $stmt->execute(['id' => $id]);
-        $patient = $stmt->fetch();
-        return $patient ?: null;
-    }
-
-    public function update(int $id, array $data): bool
-    {
-        $data['id'] = $id;
-        $sql = "UPDATE patients SET name = :name, email = :email, phone = :phone, status = :status, note = :note WHERE id = :id";
-        try {
-            return $this->db->prepare($sql)->execute($data);
-        } catch (PDOException $e) {
-            if (isset($e->errorInfo[1]) && (int)$e->errorInfo[1] === 1062) {
-                throw new DuplicateRecordException('Email này đã được sử dụng bởi bệnh nhân khác.');
-            }
-            throw $e;
-        }
-    }
-
-    public function delete(int $id): bool
-    {
-        $stmt = $this->db->prepare("DELETE FROM patients WHERE id = :id");
-        return $stmt->execute(['id' => $id]);
+        $stmt->bindValue(':limit', (int)$limit, \PDO::PARAM_INT);
+        $stmt->bindValue(':offset', (int)$offset, \PDO::PARAM_INT);
+        $stmt->execute();
+        
+        return $stmt->fetchAll(\PDO::FETCH_ASSOC);
     }
 }
